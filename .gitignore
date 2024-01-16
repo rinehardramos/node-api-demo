@@ -1,0 +1,14 @@
+.DS_Store
+.idea/
+.vscode/
+node_modules/
+migrations/
+mysql/
+build/
+tmp/
+temp/
+.env
+.terraform*
+*.tfstate*
+*.zip
+logs.txt

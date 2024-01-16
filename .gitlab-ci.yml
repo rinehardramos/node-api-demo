@@ -1,0 +1,86 @@
+# build 1.004.0
+stages:
+   - build
+   - deploy
+   - post_deploy
+   - unit_test
+   - func_test
+
+build:
+   stage: build
+   script:
+      -  ssh gitlab-runner@dev-01 "mkdir -p /mnt/efs/fs1/gitlab-runner/demo-api"
+      -  ssh gitlab-runner@dev-01 "rm -R /mnt/efs/fs1/gitlab-runner/demo-api"
+      -  ssh gitlab-runner@dev-01 "ssh-keyscan -t rsa -p 7777 gitlab.demo.ph >> ~/.ssh/known_hosts"
+      -  |
+         ssh gitlab-runner@dev-01 "cd /mnt/efs/fs1/gitlab-runner/ \
+            && git clone --branch DEV ssh://git@gitlab.demo.ph:7777/demo/demo-api \
+            && cp ${DEMO_ENV_VAR} /mnt/efs/fs1/gitlab-runner/demo-api/.env"
+      -  |
+         ssh gitlab-runner@dev-01 "cd /mnt/efs/fs1/gitlab-runner/demo-api \
+            && docker build -t demo-api:v1.0.${CI_PIPELINE_ID} . \
+            && docker tag demo-api:v1.0.${CI_PIPELINE_ID} 000000000001.dkr.ecr.ap-southeast-1.amazonaws.com/demo/demo-api:v1.0.${CI_PIPELINE_ID} \
+            && aws ecr get-login-password --region ap-southeast-1 \
+         | docker login --username AWS --password-stdin 000000000001.dkr.ecr.ap-southeast-1.amazonaws.com \
+            && docker push 000000000001.dkr.ecr.ap-southeast-1.amazonaws.com/demo/demo-api:v1.0.${CI_PIPELINE_ID} \
+            && docker stop demo-api-1 || true && docker rm demo-api-1 || true && docker image rm demo-api:v1.0.$(($CI_PIPELINE_ID - 1)) || true \
+            && docker image prune -a && docker images | grep demo"
+   rules:
+      - if: '$CI_COMMIT_BRANCH == "DEV"'
+      - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "DEV"'
+
+deploy:
+   stage: deploy
+   script:
+      -  |
+         ssh gitlab-runner@dev-02 "docker stop demo-api-1 || true \
+            && docker rm demo-api-1 || true"
+      -  |
+         ssh gitlab-runner@dev-02 "docker stop demo-api-dbsource-1 || true \
+            && docker rm demo-api-dbsource-1 || true"
+      -  |
+         ssh gitlab-runner@dev-02 "docker network rm demo || true \
+            && docker network create demo || true"
+      -  |
+         ssh gitlab-runner@dev-02 "docker run -itd -p 3307:3306 --restart=always --network=demo \
+            -v demo:/var/lib/mysql \
+            --user 1001:1001 \
+            --name demo-api-dbsource-1 \
+            -e MYSQL_DATABASE=${DATABASE_NAME} \
+            -e MYSQL_ROOT_PASSWORD=${DATABASE_PASSWORD} \
+            -e TZ=Asia/Manila \
+            mysql:5.7.39 \
+            --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --sql_mode="
+      -  |
+         ssh gitlab-runner@dev-02 "docker run -itd -p 3005:3005 --restart=always --network=demo \
+            --name demo-api-1 \
+            000000000001.dkr.ecr.ap-southeast-1.amazonaws.com/demo/demo-api:v1.0.${CI_PIPELINE_ID}"
+      - sleep 30
+   rules:
+      - if: '$CI_COMMIT_BRANCH == "DEV"'
+      - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "DEV"'
+
+post_deploy:
+   stage: post_deploy
+   script:
+      - |
+         ssh gitlab-runner@dev-01 "docker exec -t demo-api-1 ts-node demosan.js migration-generate \
+         && docker exec -t demo-api-1 ts-node demosan.js migration-run"
+   rules:
+      - if: '$CI_COMMIT_BRANCH == "DEV"'
+      - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "DEV"'
+
+unit_test:
+    stage: unit_test
+    script:
+      - ssh gitlab-runner@dev-01 "cd /mnt/efs/fs1/gitlab-runner/demo-api && docker exec demo-api-1 npm test"
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "DEV"'
+      - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "DEV"'
+func_test:
+    stage: func_test
+    script:
+        - echo "This is a placeholder for functional test"
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "DEV"'
+      - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "DEV"'
